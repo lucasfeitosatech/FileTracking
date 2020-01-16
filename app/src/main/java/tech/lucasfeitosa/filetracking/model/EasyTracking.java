@@ -21,6 +21,7 @@ public class EasyTracking {
 
     private void calculateVariables() {
 
+        this.y = x;
 
         int mod2 = (2 * getY()) % 16;
         if (mod2 != 0) {

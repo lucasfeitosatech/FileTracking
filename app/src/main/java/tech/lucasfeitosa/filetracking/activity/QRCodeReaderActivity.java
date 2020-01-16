@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.PointF;
 import android.os.Bundle;
 import android.support.annotation.NonNull;
@@ -11,10 +13,13 @@ import android.support.design.widget.Snackbar;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 import com.google.zxing.common.reedsolomon.GenericGF;
@@ -25,10 +30,12 @@ import org.apache.commons.io.IOUtils;
 
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 
 
 import okhttp3.ResponseBody;
+import retrofit2.HttpException;
 import retrofit2.Response;
 import rx.Observable;
 import rx.Observer;
@@ -58,7 +65,7 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
     private String redu;
     private StringBuilder binaryFinal;
     private String binaryDecodedOTP;
-    private String message;
+    private Bitmap message;
 
 
     @Override
@@ -79,7 +86,7 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
         super.onResume();
 
         if (qrCodeReaderView != null) {
-            qrCodeReaderView.startCamera();
+            //qrCodeReaderView.startCamera();
         }
     }
 
@@ -106,8 +113,8 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
 
     public short getXfromQRResult(byte[] rawData){
         byte[] xByteArray = new byte[2];
-        xByteArray[0] = rawData[0];
-        xByteArray[1] = rawData[1];
+        xByteArray[0] = (byte) (rawData[0] - 32);
+        xByteArray[1] = (byte)( rawData[1] - 32);
         ByteBuffer wrapped = ByteBuffer.wrap(xByteArray); // big-endian by default
         short num = wrapped.getShort();
         Log.d(TAG, "onQRCodeRead: " + num);
@@ -137,7 +144,7 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
             bits.append(s1);
         }
 
-        Log.d(TAG, "getInfoBytesFromQRResult: " + bits);
+        Log.d(TAG, "getInfoBytesFromQRResult: " + bits.length());
         return bits.substring(0,bits.length() - easyTracking.getPadQR());
     }
 
@@ -145,23 +152,30 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
         RestClient.get()
                 .downloadRedundancy("http://lucasfeitosa.online/red/" + id + ".red")
                 .flatMap(response -> {
-                    try {
-                        Log.d(TAG, "downloadRedundancy: " + response.body().byteStream());
-                        InputStream is = response.body().byteStream();
-                        byte[] mbytes = IOUtils.toByteArray(is);
-                        int[] data = new int[mbytes.length];
-                        for (int i = 0; i < mbytes.length; i++) {
-                            data[i] = mbytes[i] & 0xFF;
+                    if (response.isSuccessful()) {
+                        try {
+                            Log.d(TAG, "downloadRedundancy: " + response.body().byteStream());
+                            InputStream is = response.body().byteStream();
+                            byte[] mbytes = IOUtils.toByteArray(is);
+                            int[] data = new int[mbytes.length/2];
+                            int j = 0;
+                            for (int i = 0; i < mbytes.length; i = i + 2) {
+                                data[j] = twoBytesToInt(mbytes[i] & 0xFF , mbytes[i + 1] & 0xFF);
+                                j++;
+                            }
+                            decode2bitsInfo(data);
+                            join2bitsInfoAnd6bitsInfo();
+                            decodeOTDBits();
+                            decodeMessage();
+
+
+                            return Observable.just(response);
+                        } catch (Exception e) {
+                            return Observable.error(e);
                         }
-                        decode2bitsInfo(data);
-                        join2bitsInfoAnd6bitsInfo();
-                        decodeOTDBits();
-                        decodeMessage();
-
-
-                        return Observable.just(response);
-                    } catch (Exception e) {
-                        return Observable.error(e);
+                    }
+                    else {
+                        return Observable.error(new Error());
                     }
                 })
                 .subscribeOn(Schedulers.io())
@@ -184,11 +198,19 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
                 });
     }
 
+    public static int twoBytesToInt(int b1, int b2) {
+        String s1 = String.format("%8s", Integer.toBinaryString(b1 & 0xFF)).replace(' ', '0');
+        String s2 = String.format("%8s", Integer.toBinaryString(b2 & 0xFF)).replace(' ', '0');
+        String s = s1 + s2;
+        int b = Integer.parseInt(s, 2);
+        return b;
+    }
+
     public void decode2bitsInfo(int[] info){
 
         int[] infoRS = new int[easyTracking.getN()];
         //Varaible to count 8 bits and form a byte
-        GenericGF gf = new GenericGF(285, 256, 0);
+        GenericGF gf = new GenericGF(69643, 65536, 1);
         ReedSolomonDecoder decoder = new ReedSolomonDecoder(gf);
         int j = 0;
         for(int i = easyTracking.getK();i<easyTracking.getN();i++){
@@ -204,14 +226,14 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < easyTracking.getK(); i++) {
             //Transform the correct bytes into bits
-            sb.append(String.format("%8s", Integer.toBinaryString(infoRS[i])).replace(' ', '0'));
+            sb.append(String.format("%16s", Integer.toBinaryString(infoRS[i])).replace(' ', '0'));
         }
         //Log.d(TAG, "getInfoBytesFromQRResult:k " + sb.substring(0, sb.length() - easyTracking.getPadRS()));
         this.binaryRS = sb.substring(0, sb.length() - easyTracking.getPadRS());
         sb = new StringBuilder();
         for (int i = easyTracking.getK(); i < easyTracking.getN(); i++) {
             //Transform the correct bytes into bits
-            sb.append(String.format("%8s", Integer.toBinaryString(infoRS[i])).replace(' ', '0'));
+            sb.append(String.format("%16s", Integer.toBinaryString(infoRS[i])).replace(' ', '0'));
         };
         this.redu = sb.toString();
     }
@@ -272,21 +294,26 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
     public void decodeMessage(){
 
         try{
-            StringBuilder bits7 = new StringBuilder();
-            StringBuilder infoFinal = new StringBuilder();
+            StringBuilder bits = new StringBuilder();
+            //StringBuilder infoFinal = new StringBuilder();
+            byte[] bytes = new byte[easyTracking.getY()];
             int cont = 0;
+            int index = 0;
             for (int i = 0; i < binaryDecodedOTP.length(); i++) {
-                bits7.append(binaryDecodedOTP.charAt(i));
+                bits.append(binaryDecodedOTP.charAt(i));
                 cont++;
-                if (cont == 7) {
-                    char c1 = (char) Integer.parseInt(bits7.toString(), 2);
-                    infoFinal.append(c1);
-                    Log.d(TAG, "decodeMessage: " + infoFinal.toString());
-                    bits7 = new StringBuilder();
+                if (cont == 8) {
+                    Integer b =  Integer.parseInt(bits.toString(), 2);
+                    bytes[index] = b.byteValue();
+                    index++;
+                    //infoFinal.append(bits);
+                    //Log.d(TAG, "decodeMessage: " + infoFinal.toString());
+                    bits = new StringBuilder();
                     cont = 0;
                 }
             }
-            message = infoFinal.toString();
+            //String bitsString = infoFinal.toString();
+            message = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
 
         }catch (Exception e){
             e.printStackTrace();
@@ -324,10 +351,14 @@ public class QRCodeReaderActivity extends AppCompatActivity implements ActivityC
         return sb.toString();
     }
 
-    public void showToast(String text) {
+    public void showToast(Bitmap image) {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Decoded Message");
-        builder.setMessage(text);
+        View view = LayoutInflater.from(this).inflate(R.layout.dialog_image, null);
+        ImageView imageView = view.findViewById(R.id.imageView);
+        imageView.setImageBitmap(image);
+        builder.setView(view);
+        //builder.setTitle("Decoded Message");
+        //builder.setMessage(text);
         builder.setPositiveButton("OK", new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialog, int which) {
